@@ -213,30 +213,7 @@ export default function Home() {
     }
   ])
 
-  const [inputSources, setInputSources] = useState<InputSource[]>([
-    {
-      id: '1',
-      name: 'RTMP Primary',
-      type: 'RTMP',
-      url: 'rtmp://input.example.com/live/stream1',
-      status: 'connected',
-      bitrate: 5000,
-      resolution: '1920x1080',
-      health: 'good',
-      lastSeen: '2 minutes ago'
-    },
-    {
-      id: '2',
-      name: 'SRT Backup',
-      type: 'SRT',
-      url: 'srt://backup.example.com:4200/stream1',
-      status: 'disconnected',
-      bitrate: 0,
-      resolution: 'N/A',
-      health: 'warning',
-      lastSeen: '1 hour ago'
-    }
-  ])
+  const [inputSources, setInputSources] = useState<InputSource[]>([])
 
   const [outputDestinations, setOutputDestinations] = useState<OutputDestination[]>([
     {
@@ -315,15 +292,17 @@ export default function Home() {
 
   const fetchDashboardData = useCallback(async () => {
     try {
-      const [healthRes, logsRes] = await Promise.all([
+      const [healthRes, logsRes, inputsRes] = await Promise.all([
         fetch('/api/health'),
         fetch('/api/logs?limit=10'),
+        fetch('/api/inputs'),
       ])
       if (healthRes.ok) setHealthData(await healthRes.json())
       if (logsRes.ok) {
         const data = await logsRes.json()
         setRecentLogs(data.logs ?? [])
       }
+      if (inputsRes.ok) setInputSources(await inputsRes.json())
     } catch (e) {
       console.error('Failed to fetch dashboard data:', e)
     }
@@ -405,30 +384,46 @@ export default function Home() {
     setEncodingProgress(0)
   }
 
-  const addInputSource = () => {
+  const addInputSource = async () => {
     if (!newInputName.trim() || !newInputType) return
     const url = newInputType === 'DeckLink'
       ? `decklink://${deckLinkPort}`
       : newInputUrl.trim()
     if (!url) return
-    const newInput: InputSource = {
-      id: Date.now().toString(),
-      name: newInputName.trim(),
-      type: newInputType as InputSource['type'],
-      url,
-      status: 'disconnected',
-      bitrate: parseInt(newInputBitrate) || 0,
-      resolution: newInputResolution || '1920x1080',
-      health: 'warning',
-      lastSeen: 'Never',
+    try {
+      const res = await fetch('/api/inputs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newInputName.trim(),
+          type: newInputType,
+          url,
+          bitrate: parseInt(newInputBitrate) || 5000,
+          resolution: newInputResolution || '1920x1080',
+        }),
+      })
+      if (res.ok) {
+        const created = await res.json()
+        setInputSources(prev => [...prev, created])
+        setNewInputName('')
+        setNewInputType('')
+        setNewInputUrl('')
+        setNewInputBitrate('5000')
+        setNewInputResolution('1920x1080')
+        setDeckLinkPort('0')
+      }
+    } catch (e) {
+      console.error('Failed to save input source:', e)
     }
-    setInputSources(prev => [...prev, newInput])
-    setNewInputName('')
-    setNewInputType('')
-    setNewInputUrl('')
-    setNewInputBitrate('5000')
-    setNewInputResolution('1920x1080')
-    setDeckLinkPort('0')
+  }
+
+  const deleteInputSource = async (id: string) => {
+    try {
+      const res = await fetch(`/api/inputs/${id}`, { method: 'DELETE' })
+      if (res.ok) setInputSources(prev => prev.filter(s => s.id !== id))
+    } catch (e) {
+      console.error('Failed to delete input source:', e)
+    }
   }
 
   const getStatusColor = (status: string) => {
@@ -1087,20 +1082,28 @@ export default function Home() {
                       <div key={input.id} className="border rounded-lg p-4">
                         <div className="flex items-center justify-between mb-2">
                           <h3 className="font-medium">{input.name}</h3>
-                          <Badge 
-                            variant="secondary" 
-                            className={`${getStatusColor(input.status)} text-white`}
-                          >
-                            {input.status}
-                          </Badge>
+                          <div className="flex items-center gap-2">
+                            <Badge
+                              variant="secondary"
+                              className={`${getStatusColor(input.status)} text-white`}
+                            >
+                              {input.status}
+                            </Badge>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 w-6 p-0 text-gray-400 hover:text-red-400"
+                              onClick={() => deleteInputSource(input.id)}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </div>
                         </div>
                         <div className="text-sm text-muted-foreground space-y-1">
                           <p>Type: {input.type}</p>
                           <p>URL: {input.url}</p>
                           <p>Bitrate: {input.bitrate} Kbps</p>
                           <p>Resolution: {input.resolution}</p>
-                          <p>Health: {input.health}</p>
-                          <p>Last Seen: {input.lastSeen}</p>
                         </div>
                       </div>
                     ))}

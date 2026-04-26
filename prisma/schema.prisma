@@ -148,6 +148,22 @@ model SystemSettings {
   @@map("system_settings")
 }
 
+model InputSource {
+  id         String   @id @default(cuid())
+  name       String
+  type       String
+  url        String
+  status     String   @default("disconnected")
+  bitrate    Int      @default(5000)
+  resolution String   @default("1920x1080")
+  health     String   @default("warning")
+  lastSeen   String   @default("Never")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("input_sources")
+}
+
 model SystemLog {
   id        String       @id @default(cuid())
   level     LogLevel     @default(INFO)
