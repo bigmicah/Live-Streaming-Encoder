@@ -308,6 +308,10 @@ export default function Home() {
   const [recentLogs, setRecentLogs] = useState<any[]>([])
   const [newInputType, setNewInputType] = useState<string>('')
   const [deckLinkPort, setDeckLinkPort] = useState<string>('0')
+  const [newInputName, setNewInputName] = useState<string>('')
+  const [newInputUrl, setNewInputUrl] = useState<string>('')
+  const [newInputBitrate, setNewInputBitrate] = useState<string>('5000')
+  const [newInputResolution, setNewInputResolution] = useState<string>('1920x1080')
 
   const fetchDashboardData = useCallback(async () => {
     try {
@@ -399,6 +403,32 @@ export default function Home() {
   const stopEncoding = () => {
     setIsEncoding(false)
     setEncodingProgress(0)
+  }
+
+  const addInputSource = () => {
+    if (!newInputName.trim() || !newInputType) return
+    const url = newInputType === 'DeckLink'
+      ? `decklink://${deckLinkPort}`
+      : newInputUrl.trim()
+    if (!url) return
+    const newInput: InputSource = {
+      id: Date.now().toString(),
+      name: newInputName.trim(),
+      type: newInputType as InputSource['type'],
+      url,
+      status: 'disconnected',
+      bitrate: parseInt(newInputBitrate) || 0,
+      resolution: newInputResolution || '1920x1080',
+      health: 'warning',
+      lastSeen: 'Never',
+    }
+    setInputSources(prev => [...prev, newInput])
+    setNewInputName('')
+    setNewInputType('')
+    setNewInputUrl('')
+    setNewInputBitrate('5000')
+    setNewInputResolution('1920x1080')
+    setDeckLinkPort('0')
   }
 
   const getStatusColor = (status: string) => {
@@ -1088,7 +1118,12 @@ export default function Home() {
                 <CardContent className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="inputName">Input Name</Label>
-                    <Input id="inputName" placeholder="RTMP Primary" />
+                    <Input
+                      id="inputName"
+                      placeholder="RTMP Primary"
+                      value={newInputName}
+                      onChange={e => setNewInputName(e.target.value)}
+                    />
                   </div>
                   
                   <div className="space-y-2">
@@ -1128,6 +1163,8 @@ export default function Home() {
                       <Input
                         id="inputUrl"
                         placeholder="rtmp://input.example.com/live/stream1"
+                        value={newInputUrl}
+                        onChange={e => setNewInputUrl(e.target.value)}
                       />
                     </div>
                   )}
@@ -1135,12 +1172,17 @@ export default function Home() {
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <Label htmlFor="inputBitrate">Expected Bitrate (Kbps)</Label>
-                      <Input id="inputBitrate" type="number" defaultValue="5000" />
+                      <Input
+                        id="inputBitrate"
+                        type="number"
+                        value={newInputBitrate}
+                        onChange={e => setNewInputBitrate(e.target.value)}
+                      />
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label htmlFor="inputResolution">Resolution</Label>
-                      <Select>
+                      <Select value={newInputResolution} onValueChange={setNewInputResolution}>
                         <SelectTrigger>
                           <SelectValue placeholder="1920x1080" />
                         </SelectTrigger>
@@ -1152,8 +1194,8 @@ export default function Home() {
                       </Select>
                     </div>
                   </div>
-                  
-                  <Button className="w-full">
+
+                  <Button className="w-full" onClick={addInputSource}>
                     Add Input Source
                   </Button>
                 </CardContent>
