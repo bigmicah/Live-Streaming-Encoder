@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -304,78 +304,86 @@ export default function Home() {
   const [encodingProgress, setEncodingProgress] = useState(0)
   const [searchQuery, setSearchQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
+  const [healthData, setHealthData] = useState<any>(null)
+  const [recentLogs, setRecentLogs] = useState<any[]>([])
+  const [newInputType, setNewInputType] = useState<string>('')
+  const [deckLinkPort, setDeckLinkPort] = useState<string>('0')
 
-  // Mock data for system health
+  const fetchDashboardData = useCallback(async () => {
+    try {
+      const [healthRes, logsRes] = await Promise.all([
+        fetch('/api/health'),
+        fetch('/api/logs?limit=10'),
+      ])
+      if (healthRes.ok) setHealthData(await healthRes.json())
+      if (logsRes.ok) {
+        const data = await logsRes.json()
+        setRecentLogs(data.logs ?? [])
+      }
+    } catch (e) {
+      console.error('Failed to fetch dashboard data:', e)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchDashboardData()
+    const timer = setInterval(fetchDashboardData, 10_000)
+    return () => clearInterval(timer)
+  }, [fetchDashboardData])
+
   const systemHealth = {
-    status: 'healthy',
-    uptime: '15d 4h 32m',
-    cpuUsage: 45,
-    memoryUsage: 62,
-    diskUsage: 78,
-    activeChannels: 3,
-    totalChannels: 5
+    status: healthData?.status ?? 'unknown',
+    uptime: healthData?.uptime ?? '—',
+    cpuUsage: healthData?.cpu?.percent ?? 0,
+    memoryUsage: healthData?.memory?.percent ?? 0,
+    diskUsage: healthData?.disk?.percent ?? 0,
+    activeChannels: healthData?.streams?.active ?? 0,
+    totalChannels: healthData?.streams?.total ?? 0,
   }
 
-  const recentAlerts = [
-    {
-      id: 1,
-      type: 'warning',
-      message: 'High latency detected on Channel-001',
-      timestamp: '2 minutes ago',
-      resolved: false
-    },
-    {
-      id: 2,
-      type: 'info',
-      message: 'Scheduled maintenance window starting in 1 hour',
-      timestamp: '15 minutes ago',
-      resolved: false
-    },
-    {
-      id: 3,
-      type: 'success',
-      message: 'Channel-003 encoding completed successfully',
-      timestamp: '1 hour ago',
-      resolved: true
-    }
-  ]
+  const recentAlerts = recentLogs.slice(0, 5).map((log: any) => ({
+    id: log.id,
+    type: log.level === 'ERROR' ? 'warning' : log.level === 'WARN' ? 'warning' : 'info',
+    message: log.message,
+    timestamp: new Date(log.createdAt).toLocaleString(),
+    resolved: false,
+  }))
 
   const quickStats = [
     {
       title: 'Active Channels',
-      value: '3',
-      change: '+1',
+      value: String(healthData?.streams?.active ?? 0),
+      change: `${healthData?.streams?.total ?? 0} total`,
       icon: Radio,
-      color: 'text-blue-600'
+      color: 'text-blue-600',
     },
     {
-      title: 'Total Viewers',
-      value: '5.6K',
-      change: '+12%',
-      icon: Users,
-      color: 'text-green-600'
+      title: 'CPU Usage',
+      value: `${healthData?.cpu?.percent ?? 0}%`,
+      change: `${healthData?.cpu?.cores ?? 0} cores`,
+      icon: Activity,
+      color: 'text-green-600',
     },
     {
-      title: 'Data Processed',
-      value: '2.4 TB',
-      change: '+8%',
+      title: 'Memory',
+      value: `${healthData?.memory?.usedMB ?? 0} MB`,
+      change: `of ${healthData?.memory?.totalMB ?? 0} MB`,
       icon: Database,
-      color: 'text-purple-600'
+      color: 'text-purple-600',
     },
     {
       title: 'Uptime',
-      value: '99.9%',
-      change: '+0.1%',
-      icon: Activity,
-      color: 'text-emerald-600'
-    }
+      value: healthData?.uptime ?? '—',
+      change: healthData?.status ?? 'unknown',
+      icon: Clock,
+      color: 'text-emerald-600',
+    },
   ]
 
   const startEncoding = () => {
     setIsEncoding(true)
     setEncodingProgress(0)
-    
-    // Simulate encoding progress
+
     const interval = setInterval(() => {
       setEncodingProgress(prev => {
         if (prev >= 100) {
@@ -535,8 +543,8 @@ export default function Home() {
                   
                   <div className="flex items-center justify-between pt-4 border-t border-gray-700">
                     <div className="flex items-center gap-2">
-                      <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                      <span className="text-sm font-medium text-white">System Healthy</span>
+                      <div className={`h-2 w-2 rounded-full ${systemHealth.status === 'healthy' ? 'bg-green-500' : 'bg-yellow-500'}`}></div>
+                      <span className="text-sm font-medium text-white capitalize">System {systemHealth.status}</span>
                     </div>
                     <span className="text-sm text-gray-400">
                       Uptime: {systemHealth.uptime}
@@ -1085,7 +1093,7 @@ export default function Home() {
                   
                   <div className="space-y-2">
                     <Label htmlFor="inputType">Input Type</Label>
-                    <Select>
+                    <Select value={newInputType} onValueChange={setNewInputType}>
                       <SelectTrigger>
                         <SelectValue placeholder="Select input type" />
                       </SelectTrigger>
@@ -1098,14 +1106,31 @@ export default function Home() {
                       </SelectContent>
                     </Select>
                   </div>
-                  
-                  <div className="space-y-2">
-                    <Label htmlFor="inputUrl">Input URL</Label>
-                    <Input 
-                      id="inputUrl" 
-                      placeholder="rtmp://input.example.com/live/stream1" 
-                    />
-                  </div>
+
+                  {newInputType === 'DeckLink' ? (
+                    <div className="space-y-2">
+                      <Label htmlFor="deckLinkPort">DeckLink Port</Label>
+                      <Select value={deckLinkPort} onValueChange={setDeckLinkPort}>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select port" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">Port 0 — SDI 1</SelectItem>
+                          <SelectItem value="1">Port 1 — SDI 2</SelectItem>
+                          <SelectItem value="2">Port 2 — SDI 3</SelectItem>
+                          <SelectItem value="3">Port 3 — SDI 4</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <Label htmlFor="inputUrl">Input URL</Label>
+                      <Input
+                        id="inputUrl"
+                        placeholder="rtmp://input.example.com/live/stream1"
+                      />
+                    </div>
+                  )}
                   
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
