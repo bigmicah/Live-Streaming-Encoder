@@ -1,163 +1,207 @@
 'use client'
 
+import { useState, useEffect, useCallback } from 'react'
 import { MainLayout } from '@/components/layout/main-layout'
 import { Header } from '@/components/layout/header'
 import { Breadcrumb } from '@/components/layout/breadcrumb'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Progress } from '@/components/ui/progress'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { 
-  Play, 
-  Square, 
-  Settings, 
-  Plus, 
-  BarChart3, 
+import {
+  Plus,
+  BarChart3,
   AlertTriangle,
   CheckCircle,
   Clock,
   Activity,
-  Users,
   Zap,
   Film,
   Radio,
   Monitor,
   Calendar,
   Database,
-  Cloud
+  Settings,
+  Info,
 } from 'lucide-react'
 
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface HealthData {
+  uptimeSeconds: number
+  uptime: string
+  cpu: { percent: number; cores: number }
+  memory: { percent: number; usedMB: number; totalMB: number }
+  disk: { percent: number; usedGB: number; totalGB: number }
+  streams: { active: number; total: number }
+}
+
+interface EncodingSession {
+  id: string
+  status: string
+  startTime: string
+  outputBytes: number
+}
+
+interface Stream {
+  id: string
+  name: string
+  status: string
+  inputUrl: string
+  outputUrl: string
+  bitrate: number
+  resolution: string
+  encodingSessions: EncodingSession[]
+}
+
+interface LogEntry {
+  id: string
+  level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
+  message: string
+  component: string | null
+  createdAt: string
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatUptime(seconds: number): string {
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h ${m}m`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1e12) return `${(bytes / 1e12).toFixed(1)} TB`
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`
+  return `${bytes} B`
+}
+
+function timeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const mins = Math.floor(diff / 60000)
+  const hours = Math.floor(diff / 3600000)
+  const days = Math.floor(diff / 86400000)
+  if (days > 0) return `${days}d ago`
+  if (hours > 0) return `${hours}h ago`
+  if (mins > 0) return `${mins}m ago`
+  return 'just now'
+}
+
+function sessionUptime(startTime: string): string {
+  return formatUptime(Math.floor((Date.now() - new Date(startTime).getTime()) / 1000))
+}
+
+function alertType(level: string): 'warning' | 'error' | 'info' | 'success' {
+  if (level === 'ERROR') return 'error'
+  if (level === 'WARN') return 'warning'
+  if (level === 'INFO') return 'info'
+  return 'info'
+}
+
+// ── Component ────────────────────────────────────────────────────────────────
+
 export default function Dashboard() {
-  const breadcrumbItems = [
-    { label: 'Dashboard' }
-  ]
+  const breadcrumbItems = [{ label: 'Dashboard' }]
 
-  // Mock data for demonstration
-  const systemHealth = {
-    status: 'healthy',
-    uptime: '15d 4h 32m',
-    cpuUsage: 45,
-    memoryUsage: 62,
-    diskUsage: 78,
-    activeChannels: 3,
-    totalChannels: 5
-  }
+  const [health, setHealth] = useState<HealthData | null>(null)
+  const [streams, setStreams] = useState<Stream[]>([])
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
 
-  const recentAlerts = [
-    {
-      id: 1,
-      type: 'warning',
-      message: 'High latency detected on Channel-001',
-      timestamp: '2 minutes ago',
-      resolved: false
-    },
-    {
-      id: 2,
-      type: 'info',
-      message: 'Scheduled maintenance window starting in 1 hour',
-      timestamp: '15 minutes ago',
-      resolved: false
-    },
-    {
-      id: 3,
-      type: 'success',
-      message: 'Channel-003 encoding completed successfully',
-      timestamp: '1 hour ago',
-      resolved: true
+  const fetchData = useCallback(async () => {
+    try {
+      const [healthRes, streamsRes, logsRes] = await Promise.all([
+        fetch('/api/health'),
+        fetch('/api/streams'),
+        fetch('/api/logs?limit=6'),
+      ])
+      if (healthRes.ok) setHealth(await healthRes.json())
+      if (streamsRes.ok) setStreams(await streamsRes.json())
+      if (logsRes.ok) {
+        const data = await logsRes.json()
+        setLogs(data.logs ?? [])
+      }
+      setLastUpdated(new Date())
+    } catch (err) {
+      console.error('Dashboard fetch error:', err)
     }
-  ]
+  }, [])
 
-  const activeChannels = [
-    {
-      id: 'CH-001',
-      name: 'Live Event Stream',
-      status: 'running',
-      input: 'RTMP Primary',
-      output: 'HLS Multi-bitrate',
-      viewers: 1250,
-      bitrate: '5000 Kbps',
-      uptime: '2h 15m'
-    },
-    {
-      id: 'CH-002',
-      name: '24/7 News Channel',
-      status: 'running',
-      input: 'SRT Backup',
-      output: 'RTMP + HLS',
-      viewers: 3420,
-      bitrate: '2500 Kbps',
-      uptime: '5d 8h'
-    },
-    {
-      id: 'CH-003',
-      name: 'Sports Broadcast',
-      status: 'running',
-      input: 'NDI Source',
-      output: '4K HLS',
-      viewers: 890,
-      bitrate: '12000 Kbps',
-      uptime: '45m'
-    }
-  ]
+  useEffect(() => {
+    fetchData()
+    const id = setInterval(fetchData, 10000)
+    return () => clearInterval(id)
+  }, [fetchData])
+
+  // Computed stats
+  const activeChannels = streams.filter(s => s.status === 'ENCODING')
+  const totalDataBytes = streams.reduce((acc, s) => acc + (s.encodingSessions[0]?.outputBytes ?? 0), 0)
 
   const quickStats = [
     {
       title: 'Active Channels',
-      value: '3',
-      change: '+1',
+      value: health ? String(health.streams.active) : '—',
+      sub: health ? `of ${health.streams.total} total` : '',
       icon: Radio,
-      color: 'text-blue-600'
+      color: 'text-blue-400',
     },
     {
-      title: 'Total Viewers',
-      value: '5.6K',
-      change: '+12%',
-      icon: Users,
-      color: 'text-green-600'
+      title: 'Total Streams',
+      value: health ? String(health.streams.total) : '—',
+      sub: 'configured',
+      icon: Database,
+      color: 'text-purple-400',
     },
     {
       title: 'Data Processed',
-      value: '2.4 TB',
-      change: '+8%',
-      icon: Database,
-      color: 'text-purple-600'
+      value: formatBytes(totalDataBytes),
+      sub: 'this session',
+      icon: Activity,
+      color: 'text-green-400',
     },
     {
       title: 'Uptime',
-      value: '99.9%',
-      change: '+0.1%',
-      icon: Activity,
-      color: 'text-emerald-600'
-    }
+      value: health ? health.uptime : '—',
+      sub: 'process uptime',
+      icon: Clock,
+      color: 'text-emerald-400',
+    },
   ]
 
   return (
     <MainLayout>
       <div className="space-y-6">
-        <div>
-          <Breadcrumb items={breadcrumbItems} />
-          <Header 
-            title="Dashboard" 
-            subtitle="Monitor and manage your live streaming channels"
-          />
+        <div className="flex items-end justify-between">
+          <div>
+            <Breadcrumb items={breadcrumbItems} />
+            <Header
+              title="Dashboard"
+              subtitle="Monitor and manage your live streaming channels"
+            />
+          </div>
+          {lastUpdated && (
+            <p className="text-xs text-gray-500 pb-1">
+              Updated {timeAgo(lastUpdated.toISOString())}
+            </p>
+          )}
         </div>
 
         {/* Quick Stats */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          {quickStats.map((stat, index) => (
-            <Card key={index} className="aws-metric-card">
+          {quickStats.map((stat, i) => (
+            <Card key={i} className="aws-metric-card">
               <CardContent className="p-6">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-gray-400">
-                      {stat.title}
-                    </p>
+                    <p className="text-sm font-medium text-gray-400">{stat.title}</p>
                     <p className="text-2xl font-bold text-white">{stat.value}</p>
-                    <p className="text-xs text-orange-400">{stat.change}</p>
+                    <p className="text-xs text-gray-500">{stat.sub}</p>
                   </div>
-                  <stat.icon className={`h-8 w-8 ${stat.color.replace('text-', 'text-')}`} />
+                  <stat.icon className={`h-8 w-8 ${stat.color}`} />
                 </div>
               </CardContent>
             </Card>
@@ -173,53 +217,60 @@ export default function Dashboard() {
                 System Health
               </CardTitle>
               <CardDescription className="text-gray-400">
-                Overall system status and resource utilization
+                Real-time resource utilization
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-300">CPU Usage</span>
-                    <span className="text-white">{systemHealth.cpuUsage}%</span>
+              {health ? (
+                <>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-300">CPU Usage</span>
+                        <span className="text-white">{health.cpu.percent}%</span>
+                      </div>
+                      <Progress value={health.cpu.percent} className="h-2 aws-progress-bar" />
+                      <p className="text-xs text-gray-500">{health.cpu.cores} cores · load avg {health.cpu.loadAvg?.[0]?.toFixed(2) ?? '—'}</p>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-300">Memory</span>
+                        <span className="text-white">{health.memory.percent}%</span>
+                      </div>
+                      <Progress value={health.memory.percent} className="h-2 aws-progress-bar" />
+                      <p className="text-xs text-gray-500">{health.memory.usedMB} MB / {health.memory.totalMB} MB</p>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-300">Disk Usage</span>
+                        <span className="text-white">{health.disk.percent}%</span>
+                      </div>
+                      <Progress value={health.disk.percent} className="h-2 aws-progress-bar" />
+                      <p className="text-xs text-gray-500">{health.disk.usedGB} GB / {health.disk.totalGB} GB</p>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-300">Active Channels</span>
+                        <span className="text-white">{health.streams.active}/{health.streams.total}</span>
+                      </div>
+                      <Progress
+                        value={health.streams.total > 0 ? (health.streams.active / health.streams.total) * 100 : 0}
+                        className="h-2 aws-progress-bar"
+                      />
+                    </div>
                   </div>
-                  <Progress value={systemHealth.cpuUsage} className="h-2 aws-progress-bar" />
-                </div>
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-300">Memory Usage</span>
-                    <span className="text-white">{systemHealth.memoryUsage}%</span>
+
+                  <div className="flex items-center justify-between pt-4 border-t border-gray-700">
+                    <div className="flex items-center gap-2">
+                      <div className="h-2 w-2 rounded-full aws-status-online" />
+                      <span className="text-sm font-medium text-white">System Healthy</span>
+                    </div>
+                    <span className="text-sm text-gray-400">Uptime: {health.uptime}</span>
                   </div>
-                  <Progress value={systemHealth.memoryUsage} className="h-2 aws-progress-bar" />
-                </div>
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-300">Disk Usage</span>
-                    <span className="text-white">{systemHealth.diskUsage}%</span>
-                  </div>
-                  <Progress value={systemHealth.diskUsage} className="h-2 aws-progress-bar" />
-                </div>
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-300">Active Channels</span>
-                    <span className="text-white">{systemHealth.activeChannels}/{systemHealth.totalChannels}</span>
-                  </div>
-                  <Progress 
-                    value={(systemHealth.activeChannels / systemHealth.totalChannels) * 100} 
-                    className="h-2 aws-progress-bar" 
-                  />
-                </div>
-              </div>
-              
-              <div className="flex items-center justify-between pt-4 border-t border-gray-700">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full aws-status-online"></div>
-                  <span className="text-sm font-medium text-white">System Healthy</span>
-                </div>
-                <span className="text-sm text-gray-400">
-                  Uptime: {systemHealth.uptime}
-                </span>
-              </div>
+                </>
+              ) : (
+                <div className="text-center py-8 text-gray-500">Loading health data…</div>
+              )}
             </CardContent>
           </Card>
 
@@ -232,32 +283,46 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {recentAlerts.map((alert) => (
-                <div key={alert.id} className="flex items-start gap-3 p-3 rounded-lg border border-gray-700">
-                  <div className={`mt-0.5 ${
-                    alert.type === 'warning' ? 'text-yellow-400' :
-                    alert.type === 'success' ? 'text-green-400' :
-                    'text-blue-400'
-                  }`}>
-                    {alert.type === 'warning' ? <AlertTriangle className="h-4 w-4" /> :
-                     alert.type === 'success' ? <CheckCircle className="h-4 w-4" /> :
-                     <Clock className="h-4 w-4" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate">
-                      {alert.message}
-                    </p>
-                    <p className="text-xs text-gray-400">
-                      {alert.timestamp}
-                    </p>
-                  </div>
-                  {alert.resolved && (
-                    <Badge variant="outline" className="text-xs bg-green-500/20 text-green-400 border-green-500/30">
-                      Resolved
-                    </Badge>
-                  )}
-                </div>
-              ))}
+              {logs.length === 0 ? (
+                <p className="text-sm text-gray-500 text-center py-4">No recent events</p>
+              ) : (
+                logs.map(log => {
+                  const type = alertType(log.level)
+                  return (
+                    <div key={log.id} className="flex items-start gap-3 p-3 rounded-lg border border-gray-700">
+                      <div className={`mt-0.5 shrink-0 ${
+                        type === 'error'   ? 'text-red-400' :
+                        type === 'warning' ? 'text-yellow-400' :
+                        type === 'success' ? 'text-green-400' :
+                        'text-blue-400'
+                      }`}>
+                        {type === 'error' || type === 'warning'
+                          ? <AlertTriangle className="h-4 w-4" />
+                          : type === 'success'
+                          ? <CheckCircle className="h-4 w-4" />
+                          : <Info className="h-4 w-4" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-white truncate">{log.message}</p>
+                        <p className="text-xs text-gray-400">
+                          {log.component && <span className="mr-1 text-gray-500">[{log.component}]</span>}
+                          {timeAgo(log.createdAt)}
+                        </p>
+                      </div>
+                      <Badge
+                        variant="outline"
+                        className={`text-xs shrink-0 ${
+                          log.level === 'ERROR' ? 'border-red-500/30 text-red-400' :
+                          log.level === 'WARN'  ? 'border-yellow-500/30 text-yellow-400' :
+                          'border-gray-600 text-gray-400'
+                        }`}
+                      >
+                        {log.level}
+                      </Badge>
+                    </div>
+                  )
+                })
+              )}
             </CardContent>
           </Card>
         </div>
@@ -269,10 +334,12 @@ export default function Dashboard() {
               <div>
                 <CardTitle className="flex items-center gap-2 text-white">
                   <Radio className="h-5 w-5 text-orange-400" />
-                  Active Channels
+                  {activeChannels.length > 0 ? 'Active Channels' : 'All Streams'}
                 </CardTitle>
                 <CardDescription className="text-gray-400">
-                  Currently running live streaming channels
+                  {activeChannels.length > 0
+                    ? 'Currently encoding streams'
+                    : 'No streams encoding — showing all configured streams'}
                 </CardDescription>
               </div>
               <Button className="aws-button-gradient">
@@ -282,55 +349,81 @@ export default function Dashboard() {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="space-y-4">
-              {activeChannels.map((channel) => (
-                <div key={channel.id} className="flex items-center justify-between p-4 border border-gray-700 rounded-lg">
-                  <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2">
-                      <div className={`h-2 w-2 rounded-full ${
-                        channel.status === 'running' ? 'aws-status-online' : 'aws-status-warning'
-                      }`}></div>
-                      <div>
-                        <h3 className="font-medium text-white">{channel.name}</h3>
-                        <p className="text-sm text-gray-400">{channel.id}</p>
+            {streams.length === 0 ? (
+              <p className="text-center py-8 text-gray-500">
+                No streams configured yet. Create a stream to get started.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                {(activeChannels.length > 0 ? activeChannels : streams).map(stream => {
+                  const session = stream.encodingSessions[0]
+                  const isEncoding = stream.status === 'ENCODING'
+                  return (
+                    <div key={stream.id} className="flex items-center justify-between p-4 border border-gray-700 rounded-lg">
+                      <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2">
+                          <div className={`h-2 w-2 rounded-full ${
+                            isEncoding        ? 'aws-status-online' :
+                            stream.status === 'ERROR' ? 'bg-red-500' :
+                            'bg-gray-500'
+                          }`} />
+                          <div>
+                            <h3 className="font-medium text-white">{stream.name}</h3>
+                            <p className="text-xs text-gray-500 truncate max-w-[160px]">{stream.id}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4 text-sm">
+                          <div className="flex items-center gap-1">
+                            <Monitor className="h-4 w-4 text-gray-400" />
+                            <span className="text-gray-300 truncate max-w-[120px]">{stream.inputUrl}</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Zap className="h-4 w-4 text-gray-400" />
+                            <span className="text-gray-300">{stream.bitrate} kbps</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Film className="h-4 w-4 text-gray-400" />
+                            <span className="text-gray-300">{stream.resolution}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <Badge
+                          className={
+                            isEncoding        ? 'bg-green-600' :
+                            stream.status === 'ERROR'   ? 'bg-red-600' :
+                            stream.status === 'STOPPING' ? 'bg-yellow-600' :
+                            'bg-gray-600'
+                          }
+                        >
+                          {stream.status}
+                        </Badge>
+                        {isEncoding && session && (
+                          <div className="text-right">
+                            <div className="text-sm font-medium text-white">{sessionUptime(session.startTime)}</div>
+                            <div className="text-xs text-gray-400">uptime</div>
+                          </div>
+                        )}
+                        {isEncoding && session && session.outputBytes > 0 && (
+                          <div className="text-right">
+                            <div className="text-sm font-medium text-white">{formatBytes(session.outputBytes)}</div>
+                            <div className="text-xs text-gray-400">output</div>
+                          </div>
+                        )}
+                        <div className="flex gap-2">
+                          <Button variant="outline" size="sm" className="border-gray-600 text-gray-300 hover:bg-gray-800">
+                            <Settings className="h-4 w-4" />
+                          </Button>
+                          <Button variant="outline" size="sm" className="border-gray-600 text-gray-300 hover:bg-gray-800">
+                            <BarChart3 className="h-4 w-4" />
+                          </Button>
+                        </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-4 text-sm">
-                      <div className="flex items-center gap-1">
-                        <Monitor className="h-4 w-4 text-gray-400" />
-                        <span className="text-gray-300">{channel.input}</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <Film className="h-4 w-4 text-gray-400" />
-                        <span className="text-gray-300">{channel.output}</span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <Zap className="h-4 w-4 text-gray-400" />
-                        <span className="text-gray-300">{channel.bitrate}</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-4">
-                    <div className="text-right">
-                      <div className="text-sm font-medium text-white">{channel.viewers.toLocaleString()}</div>
-                      <div className="text-xs text-gray-400">viewers</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-sm font-medium text-white">{channel.uptime}</div>
-                      <div className="text-xs text-gray-400">uptime</div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button variant="outline" size="sm" className="border-gray-600 text-gray-300 hover:bg-gray-800">
-                        <Settings className="h-4 w-4" />
-                      </Button>
-                      <Button variant="outline" size="sm" className="border-gray-600 text-gray-300 hover:bg-gray-800">
-                        <BarChart3 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+                  )
+                })}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -338,9 +431,6 @@ export default function Dashboard() {
         <Card className="aws-metric-card">
           <CardHeader>
             <CardTitle className="text-white">Quick Actions</CardTitle>
-            <CardDescription className="text-gray-400">
-              Common tasks and operations
-            </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

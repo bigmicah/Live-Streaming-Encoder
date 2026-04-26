@@ -56,6 +56,8 @@ export default function InputsPage() {
   const [typeFilter, setTypeFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
+  const [newInputType, setNewInputType] = useState('')
+  const [deckLinkPort, setDeckLinkPort] = useState('0')
 
   // Mock data for demonstration
   const inputs = [
@@ -335,7 +337,7 @@ export default function InputsPage() {
                         </div>
                         <div className="space-y-2">
                           <Label htmlFor="inputType">Input Type</Label>
-                          <Select>
+                          <Select value={newInputType} onValueChange={(v) => { setNewInputType(v); setDeckLinkPort('0') }}>
                             <SelectTrigger>
                               <SelectValue placeholder="Select input type" />
                             </SelectTrigger>
@@ -349,14 +351,48 @@ export default function InputsPage() {
                           </Select>
                         </div>
                       </div>
+
+                      {/* DeckLink port selector — shown only when DeckLink is chosen */}
+                      {newInputType === 'decklink' && (
+                        <div className="space-y-2">
+                          <Label htmlFor="deckLinkPort">DeckLink Input Port</Label>
+                          <Select value={deckLinkPort} onValueChange={setDeckLinkPort}>
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select input port" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="0">Port 0 (SDI / HDMI 1)</SelectItem>
+                              <SelectItem value="1">Port 1 (SDI / HDMI 2)</SelectItem>
+                              <SelectItem value="2">Port 2 (SDI / HDMI 3)</SelectItem>
+                              <SelectItem value="3">Port 3 (SDI / HDMI 4)</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <p className="text-xs text-muted-foreground">
+                            Input URL will be set to <code className="bg-muted px-1 rounded">decklink://{deckLinkPort}</code>
+                          </p>
+                        </div>
+                      )}
+
+                      {/* URL / Port fields — hidden for DeckLink */}
+                      {newInputType !== 'decklink' && (
+                        <>
                       <div className="space-y-2">
                         <Label htmlFor="inputUrl">Input URL</Label>
-                        <Input id="inputUrl" placeholder="rtmp://input.example.com/live/stream" />
+                        <Input id="inputUrl" placeholder={
+                          newInputType === 'srt'  ? 'srt://0.0.0.0:9000?mode=listener' :
+                          newInputType === 'udp'  ? 'udp://0.0.0.0:1234' :
+                          newInputType === 'ndi'  ? 'ndi://studio.local/Camera1' :
+                          'rtmp://input.example.com/live/stream'
+                        } />
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                           <Label htmlFor="port">Port</Label>
-                          <Input id="port" type="number" placeholder="1935" />
+                          <Input id="port" type="number" placeholder={
+                            newInputType === 'srt' ? '9000' :
+                            newInputType === 'udp' ? '1234' :
+                            '1935'
+                          } />
                         </div>
                         <div className="space-y-2">
                           <Label htmlFor="application">Application/Stream ID</Label>
@@ -367,6 +403,8 @@ export default function InputsPage() {
                         <Label htmlFor="streamKey">Stream Key (if applicable)</Label>
                         <Input id="streamKey" type="password" placeholder="stream-key-here" />
                       </div>
+                        </>
+                      )}
                       <div className="flex items-center space-x-4">
                         <div className="flex items-center space-x-2">
                           <Switch id="backup" />
