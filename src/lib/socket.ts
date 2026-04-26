@@ -1,5 +1,8 @@
 import { Server } from 'socket.io';
+import path from 'path';
 import { db } from '@/lib/db';
+import { streamingEncoder } from '@/lib/services/streaming-encoder';
+import type { FFmpegOptions } from '@/lib/services/streaming-encoder';
 
 export interface StreamStatusUpdate {
   streamId: string;
@@ -145,22 +148,58 @@ export const setupSocket = (io: Server) => {
             status: 'STARTING'
           }
         });
-        
+
         // Update stream status
         await db.stream.update({
           where: { id: data.streamId },
           data: { status: 'ENCODING' }
         });
-        
+
+        // Build options and start FFmpeg
+        const settings = await db.systemSettings.findFirst();
+        const hlsBase = process.env.HLS_OUTPUT_DIR ?? path.join(process.cwd(), 'public', 'hls');
+        const outputDirectory = path.join(hlsBase, stream.id);
+
+        const options: FFmpegOptions = {
+          inputUrl: stream.inputUrl,
+          outputUrl: stream.outputUrl,
+          outputDirectory,
+          bitrate: stream.bitrate,
+          resolution: stream.resolution,
+          preset: stream.encoderPreset,
+          gopSize: stream.gopSize,
+          bFrames: stream.bFrames,
+          profile: stream.profile,
+          chroma: stream.chroma,
+          aspectRatio: stream.aspectRatio,
+          keyframeInterval: stream.keyframeInterval,
+          pcr: stream.pcr,
+          audioCodec: stream.audioCodec,
+          audioBitrate: stream.audioBitrate,
+          audioLKFS: stream.audioLKFS,
+          audioSampleRate: stream.audioSampleRate,
+          scte35Enabled: stream.scte35Enabled,
+          scte35Pid: stream.scte35Pid,
+          nullPid: stream.nullPid,
+          latency: stream.latency,
+          hlsTime: settings?.hlsTime ?? 6,
+          hlsListSize: settings?.hlsListSize ?? 10,
+          hlsFlags: settings?.hlsFlags ?? 'delete_segments+append_list',
+        };
+
+        streamingEncoder.startEncoding(stream.id, encodingSession.id, options).catch((err) => {
+          console.error('FFmpeg start error (socket):', err);
+        });
+
         // Broadcast stream status update
         const statusUpdate: StreamStatusUpdate = {
           streamId: data.streamId,
           status: 'ENCODING',
           timestamp: new Date()
         };
-        
+
         io.to('streaming-updates').emit('stream-status-update', statusUpdate);
-        
+
         // Log the action
         await db.systemLog.create({
           data: {
@@ -169,7 +208,7 @@ export const setupSocket = (io: Server) => {
             component: 'websocket'
           }
         });
-        
+
         socket.emit('encoding-started', {
           sessionId: encodingSession.id,
           streamId: data.streamId
@@ -198,39 +237,18 @@ export const setupSocket = (io: Server) => {
           return;
         }
         
-        // Update encoding session status
-        await db.encodingSession.update({
-          where: { id: activeSession.id },
-          data: {
-            status: 'STOPPING',
-            endTime: new Date()
-          }
-        });
-        
-        // Update stream status
-        await db.stream.update({
-          where: { id: data.streamId },
-          data: { status: 'STOPPING' }
-        });
-        
+        // Stop the FFmpeg process and update DB
+        await streamingEncoder.stopEncoding(activeSession.id, data.streamId);
+
         // Broadcast stream status update
         const statusUpdate: StreamStatusUpdate = {
           streamId: data.streamId,
-          status: 'STOPPING',
+          status: 'IDLE',
           timestamp: new Date()
         };
-        
+
         io.to('streaming-updates').emit('stream-status-update', statusUpdate);
-        
-        // Log the action
-        await db.systemLog.create({
-          data: {
-            level: 'INFO',
-            message: `Stopped encoding for stream ${data.streamId}`,
-            component: 'websocket'
-          }
-        });
-        
+
         socket.emit('encoding-stopped', {
           sessionId: activeSession.id,
           streamId: data.streamId

@@ -1,14 +1,14 @@
-import { exec, spawn } from 'child_process'
-import { promisify } from 'util'
+import { spawn } from 'child_process'
+import type { ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs/promises'
 import { db } from '@/lib/db'
-
-const execAsync = promisify(exec)
+import { getIO } from '@/lib/io-server'
 
 export interface FFmpegOptions {
   inputUrl: string
   outputUrl: string
+  outputDirectory: string
   bitrate: number
   resolution: string
   preset: string
@@ -27,9 +27,6 @@ export interface FFmpegOptions {
   scte35Pid: number
   nullPid: number
   latency: number
-  outputDirectory: string
-  segmentDuration: number
-  playlistSize: number
   hlsTime: number
   hlsListSize: number
   hlsFlags: string
@@ -49,240 +46,283 @@ export interface EncodingMetadata {
   logPath: string
 }
 
+const CHROMA_MAP: Record<string, string> = {
+  '4:2:0': 'yuv420p',
+  '4:2:2': 'yuv422p',
+  '4:4:4': 'yuv444p',
+}
+
+// Regex to parse FFmpeg progress lines written to stderr:
+// frame=  247 fps= 30 q=27.0 size=    4608kB time=00:00:08.23 bitrate=4588.8kbits/s speed=1.00x
+const STATS_RE = /frame=\s*(\d+)\s+fps=\s*([\d.]+).*?size=\s*(\d+)kB.*?bitrate=\s*([\d.]+)kbits.*?speed=\s*([\d.]+)x/
+
 export class StreamingEncoder {
-  private activeProcesses: Map<string, any> = new Map()
+  private activeProcesses: Map<string, ChildProcess> = new Map()
+  private stoppingIntentionally: Set<string> = new Set()
 
-  async startEncoding(streamId: string, sessionId: string, options: FFmpegOptions): Promise<EncodingMetadata> {
-    try {
-      // Create output directory if it doesn't exist
-      await fs.mkdir(options.outputDirectory, { recursive: true })
+  async startEncoding(
+    streamId: string,
+    sessionId: string,
+    options: FFmpegOptions
+  ): Promise<EncodingMetadata> {
+    await fs.mkdir(options.outputDirectory, { recursive: true })
 
-      // Generate FFmpeg command
-      const ffmpegCommand = this.buildFFmpegCommand(options, sessionId)
+    const { ffmpegPath, args, fullCommand } = this.buildFFmpegCommand(options)
+    const logPath = path.join(options.outputDirectory, `encoding_${sessionId}.log`)
 
-      // Create log file path
-      const logPath = path.join(options.outputDirectory, `encoding_${sessionId}.log`)
+    const proc = spawn(ffmpegPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
 
-      // Start FFmpeg process
-      const process = spawn(ffmpegCommand.ffmpegPath, ffmpegCommand.args, {
-        detached: true,
-        stdio: ['ignore', 'pipe', 'pipe']
+    this.activeProcesses.set(sessionId, proc)
+
+    // Write stdout + stderr to log file; parse stderr for stats
+    const logStream = (await fs.open(logPath, 'w')).createWriteStream()
+    proc.stdout?.pipe(logStream)
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      logStream.write(chunk)
+      this.handleStatsLine(sessionId, streamId, chunk.toString())
+    })
+
+    proc.on('exit', (code, signal) =>
+      this.handleProcessExit(sessionId, streamId, code, signal)
+    )
+    proc.on('error', (err) => this.handleProcessError(sessionId, err))
+
+    await db.encodingSession.update({
+      where: { id: sessionId },
+      data: { status: 'RUNNING', pid: proc.pid, logPath },
+    })
+
+    await db.systemLog.create({
+      data: {
+        level: 'INFO',
+        message: `Started encoding session ${sessionId} for stream ${streamId}`,
+        component: 'encoder',
+        metadata: JSON.stringify({ ffmpegCommand: fullCommand }),
+      },
+    })
+
+    getIO()?.to('streaming-updates').emit('stream-status-update', {
+      streamId,
+      status: 'ENCODING',
+      timestamp: new Date(),
+    })
+
+    return {
+      streamId,
+      sessionId,
+      startTime: new Date(),
+      inputUrl: options.inputUrl,
+      outputUrl: options.outputUrl,
+      bitrate: options.bitrate,
+      resolution: options.resolution,
+      scte35Enabled: options.scte35Enabled,
+      ffmpegCommand: fullCommand,
+      pid: proc.pid,
+      logPath,
+    }
+  }
+
+  async stopEncoding(sessionId: string, streamId?: string): Promise<void> {
+    const proc = this.activeProcesses.get(sessionId)
+    if (proc) {
+      this.stoppingIntentionally.add(sessionId)
+      proc.kill('SIGTERM')
+      // Give FFmpeg 5 s to flush and exit cleanly before forcing it
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => {
+          if (this.activeProcesses.has(sessionId)) proc.kill('SIGKILL')
+          resolve()
+        }, 5000)
+        proc.once('exit', () => { clearTimeout(timeout); resolve() })
       })
+      this.activeProcesses.delete(sessionId)
+    }
 
-      // Store process reference
-      this.activeProcesses.set(sessionId, process)
+    await db.encodingSession.update({
+      where: { id: sessionId },
+      data: { status: 'COMPLETED', endTime: new Date() },
+    })
 
-      // Create log file and redirect output
-      const logFile = await fs.open(logPath, 'w')
-      process.stdout?.pipe(logFile.createWriteStream())
-      process.stderr?.pipe(logFile.createWriteStream())
-
-      // Handle process events
-      process.on('exit', async (code, signal) => {
-        await this.handleProcessExit(sessionId, code, signal)
+    if (streamId) {
+      await db.stream.update({
+        where: { id: streamId },
+        data: { status: 'IDLE' },
       })
+    }
 
-      process.on('error', async (error) => {
-        await this.handleProcessError(sessionId, error)
-      })
+    await db.systemLog.create({
+      data: {
+        level: 'INFO',
+        message: `Stopped encoding session ${sessionId}`,
+        component: 'encoder',
+      },
+    })
 
-      const metadata: EncodingMetadata = {
+    if (streamId) {
+      getIO()?.to('streaming-updates').emit('stream-status-update', {
         streamId,
-        sessionId,
-        startTime: new Date(),
-        inputUrl: options.inputUrl,
-        outputUrl: options.outputUrl,
-        bitrate: options.bitrate,
-        resolution: options.resolution,
-        scte35Enabled: options.scte35Enabled,
-        ffmpegCommand: ffmpegCommand.fullCommand,
-        pid: process.pid,
-        logPath
-      }
-
-      // Update encoding session with process details
-      await db.encodingSession.update({
-        where: { id: sessionId },
-        data: {
-          status: 'RUNNING',
-          pid: process.pid,
-          logPath
-        }
+        status: 'IDLE',
+        timestamp: new Date(),
       })
-
-      // Log the start of encoding
-      await db.systemLog.create({
-        data: {
-          level: 'INFO',
-          message: `Started encoding session ${sessionId} for stream ${streamId}`,
-          component: 'encoder',
-          metadata: JSON.stringify(metadata)
-        }
-      })
-
-      return metadata
-    } catch (error) {
-      console.error('Error starting encoding:', error)
-      throw error
     }
   }
 
-  async stopEncoding(sessionId: string): Promise<void> {
-    try {
-      const process = this.activeProcesses.get(sessionId)
-      if (process) {
-        // Send SIGTERM to gracefully stop the process
-        process.kill('SIGTERM')
-        
-        // Wait a bit for graceful shutdown
-        await new Promise(resolve => setTimeout(resolve, 5000))
-        
-        // If still running, force kill
-        if (this.activeProcesses.has(sessionId)) {
-          process.kill('SIGKILL')
-        }
-        
-        this.activeProcesses.delete(sessionId)
-      }
-
-      // Update encoding session
-      await db.encodingSession.update({
-        where: { id: sessionId },
-        data: {
-          status: 'STOPPING',
-          endTime: new Date()
-        }
-      })
-
-      // Log the stop
-      await db.systemLog.create({
-        data: {
-          level: 'INFO',
-          message: `Stopped encoding session ${sessionId}`,
-          component: 'encoder'
-        }
-      })
-    } catch (error) {
-      console.error('Error stopping encoding:', error)
-      throw error
-    }
-  }
-
-  private buildFFmpegCommand(options: FFmpegOptions, sessionId: string): {
+  private buildFFmpegCommand(options: FFmpegOptions): {
     ffmpegPath: string
     args: string[]
     fullCommand: string
   } {
-    const ffmpegPath = '/usr/local/bin/ffmpeg' // Default path, should be configurable
-    
-    const args = [
-      '-i', options.inputUrl,
-      
-      // Video codec settings
-      '-c:v', 'libx264',
-      '-preset', options.preset,
-      '-profile:v', options.profile,
-      '-b:v', `${options.bitrate}k`,
-      '-maxrate', `${options.bitrate * 1.5}k`,
-      '-bufsize', `${options.bitrate * 2}k`,
-      '-s', options.resolution,
-      '-aspect', options.aspectRatio,
-      '-g', options.keyframeInterval.toString(),
-      '-keyint_min', options.keyframeInterval.toString(),
-      '-bf', options.bFrames.toString(),
-      '-pix_fmt', `yuv${options.chroma.replace(':', '')}p`,
-      '-sc_threshold', '0',
-      
-      // PCR settings
-      '-pcr_period', '20', // 20ms PCR period
-      '-mpegts_pcr_start', '0',
-      
-      // Audio codec settings
-      '-c:a', 'aac',
-      '-profile:a', 'aac_low',
-      '-b:a', `${options.audioBitrate}k`,
-      '-ar', options.audioSampleRate.toString(),
-      '-af', `volume=${Math.pow(10, options.audioLKFS / 20)}`, // Convert LKFS to linear scale
-      
-      // SCTE-35 settings
-      '-scte35_pid', options.scte35Pid.toString(),
-      '-mpegts_null_pid', options.nullPid.toString(),
-      
-      // Transport stream settings
-      '-f', 'mpegts',
-      '-mpegts_transport_stream_id', '1',
-      '-mpegts_original_network_id', '1',
-      '-mpegts_service_id', '1',
-      '-mpegts_service_type', 'digital_tv',
-      '-mpegts_pmt_start_pid', '16',
-      '-mpegts_start_pid', '256',
-      
-      // Latency settings for SRT
-      '-flush_packets', '1',
-      '-fflags', '+genpts+ignidx',
-      
-      // Output
-      `${options.outputUrl}`
-    ]
+    const ffmpegPath = process.env.FFMPEG_PATH ?? '/usr/bin/ffmpeg'
+    const args: string[] = ['-y']
 
-    // Add SCTE-35 specific arguments if enabled
-    if (options.scte35Enabled) {
-      args.splice(args.indexOf('-f'), 0, '-scte35_from_stream', 'true')
+    // ── Input ──────────────────────────────────────────────────────────────
+    if (options.inputUrl.startsWith('decklink://')) {
+      // e.g. decklink://0  →  -f decklink -i "0"
+      const device = options.inputUrl.replace('decklink://', '') || '0'
+      args.push('-f', 'decklink', '-i', device)
+    } else if (
+      options.inputUrl.startsWith('rtmp://') &&
+      (options.inputUrl.includes('0.0.0.0') ||
+        options.inputUrl.includes('localhost') ||
+        options.inputUrl.includes('127.0.0.1'))
+    ) {
+      // Local RTMP: listen for an incoming push
+      args.push('-listen', '1', '-i', options.inputUrl)
+    } else {
+      // SRT (srt://...), remote RTMP, UDP (udp://...) — FFmpeg handles natively
+      args.push('-i', options.inputUrl)
     }
 
-    const fullCommand = `${ffmpegPath} ${args.join(' ')}`
+    // ── Video ──────────────────────────────────────────────────────────────
+    const pixFmt = CHROMA_MAP[options.chroma] ?? 'yuv420p'
+    args.push(
+      '-c:v', 'libx264',
+      '-preset', options.preset || 'fast',
+      '-profile:v', options.profile || 'high',
+      '-level:v', '4.1',
+      '-b:v', `${options.bitrate}k`,
+      '-maxrate', `${Math.round(options.bitrate * 1.5)}k`,
+      '-bufsize', `${options.bitrate * 2}k`,
+      '-s', options.resolution,
+      '-r', '30',
+      '-g', options.keyframeInterval.toString(),
+      '-keyint_min', options.keyframeInterval.toString(),
+      '-bf', Math.min(options.bFrames, 2).toString(),
+      '-pix_fmt', pixFmt,
+      '-sc_threshold', '0'
+    )
 
+    // ── Audio ──────────────────────────────────────────────────────────────
+    args.push(
+      '-c:a', 'aac',
+      '-b:a', `${options.audioBitrate}k`,
+      '-ar', options.audioSampleRate.toString()
+    )
+
+    // ── HLS output ─────────────────────────────────────────────────────────
+    const m3u8     = path.join(options.outputDirectory, 'stream.m3u8')
+    const segments = path.join(options.outputDirectory, 'segment_%05d.ts')
+    args.push(
+      '-f', 'hls',
+      '-hls_time', options.hlsTime.toString(),
+      '-hls_list_size', options.hlsListSize.toString(),
+      '-hls_flags', options.hlsFlags || 'delete_segments+append_list',
+      '-hls_segment_filename', segments,
+      m3u8
+    )
+
+    const fullCommand = `${ffmpegPath} ${args.join(' ')}`
     return { ffmpegPath, args, fullCommand }
   }
 
-  private async handleProcessExit(sessionId: string, code: number | null, signal: string | null): Promise<void> {
-    try {
-      this.activeProcesses.delete(sessionId)
+  private handleStatsLine(sessionId: string, streamId: string, data: string): void {
+    const m = data.match(STATS_RE)
+    if (!m) return
+    const [, frames, fps, sizeKB, bitrateKbps, speed] = m
+    getIO()?.to('streaming-updates').emit('encoding-stats', {
+      sessionId,
+      streamId,
+      frames: parseInt(frames),
+      fps: parseFloat(fps),
+      sizeKB: parseInt(sizeKB),
+      bitrateKbps: parseFloat(bitrateKbps),
+      speed: parseFloat(speed),
+      timestamp: new Date(),
+    })
+  }
 
-      const status = code === 0 ? 'COMPLETED' : 'ERROR'
-      
+  private async handleProcessExit(
+    sessionId: string,
+    streamId: string,
+    code: number | null,
+    signal: string | null
+  ): Promise<void> {
+    this.activeProcesses.delete(sessionId)
+    const intentional = this.stoppingIntentionally.delete(sessionId)
+    const status = intentional || code === 0 ? 'COMPLETED' : 'ERROR'
+
+    try {
       await db.encodingSession.update({
         where: { id: sessionId },
-        data: {
-          status,
-          endTime: new Date(),
-          progress: 100
-        }
+        data: { status, endTime: new Date(), progress: 100 },
+      })
+
+      await db.stream.update({
+        where: { id: streamId },
+        data: { status: status === 'ERROR' ? 'ERROR' : 'IDLE' },
       })
 
       await db.systemLog.create({
         data: {
-          level: code === 0 ? 'INFO' : 'ERROR',
+          level: status === 'ERROR' ? 'ERROR' : 'INFO',
           message: `Encoding session ${sessionId} ${status.toLowerCase()} (code: ${code}, signal: ${signal})`,
-          component: 'encoder'
-        }
+          component: 'encoder',
+        },
       })
-    } catch (error) {
-      console.error('Error handling process exit:', error)
+
+      getIO()?.to('streaming-updates').emit('stream-status-update', {
+        streamId,
+        status: status === 'ERROR' ? 'ERROR' : 'IDLE',
+        timestamp: new Date(),
+      })
+    } catch (err) {
+      console.error('Error handling process exit:', err)
     }
   }
 
   private async handleProcessError(sessionId: string, error: Error): Promise<void> {
-    try {
-      this.activeProcesses.delete(sessionId)
+    this.activeProcesses.delete(sessionId)
+    this.stoppingIntentionally.delete(sessionId)
 
-      await db.encodingSession.update({
-        where: { id: sessionId },
-        data: {
+    try {
+      const session = await db.encodingSession.findUnique({ where: { id: sessionId } })
+      if (session) {
+        await db.encodingSession.update({
+          where: { id: sessionId },
+          data: { status: 'ERROR', endTime: new Date() },
+        })
+        await db.stream.update({
+          where: { id: session.streamId },
+          data: { status: 'ERROR' },
+        })
+        getIO()?.to('streaming-updates').emit('stream-status-update', {
+          streamId: session.streamId,
           status: 'ERROR',
-          endTime: new Date()
-        }
-      })
+          timestamp: new Date(),
+        })
+      }
 
       await db.systemLog.create({
         data: {
           level: 'ERROR',
           message: `Encoding session ${sessionId} error: ${error.message}`,
-          component: 'encoder'
-        }
+          component: 'encoder',
+        },
       })
-    } catch (error) {
-      console.error('Error handling process error:', error)
+    } catch (err) {
+      console.error('Error handling process error:', err)
     }
   }
 
@@ -293,31 +333,18 @@ export class StreamingEncoder {
     outputBytes: number
     isRunning: boolean
   }> {
-    try {
-      const session = await db.encodingSession.findUnique({
-        where: { id: sessionId }
-      })
-
-      if (!session) {
-        throw new Error('Encoding session not found')
-      }
-
-      const isRunning = this.activeProcesses.has(sessionId)
-
-      return {
-        status: session.status,
-        progress: session.progress,
-        inputBytes: session.inputBytes,
-        outputBytes: session.outputBytes,
-        isRunning
-      }
-    } catch (error) {
-      console.error('Error getting encoding status:', error)
-      throw error
+    const session = await db.encodingSession.findUnique({ where: { id: sessionId } })
+    if (!session) throw new Error('Encoding session not found')
+    return {
+      status: session.status,
+      progress: session.progress,
+      inputBytes: session.inputBytes,
+      outputBytes: session.outputBytes,
+      isRunning: this.activeProcesses.has(sessionId),
     }
   }
 
-  async getActiveSessions(): Promise<string[]> {
+  getActiveSessions(): string[] {
     return Array.from(this.activeProcesses.keys())
   }
 }
